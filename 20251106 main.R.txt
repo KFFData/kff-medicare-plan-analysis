@@ -1,0 +1,1616 @@
+
+# source( "S:/Users/AnthonyD/Medicare Tracker/programs/county-level plan availability/20251106 main.R" , echo = TRUE )
+# this script creates two tables for 2026: ma & pdp for fall availability
+
+
+
+# # # # # # # # # # # # #
+# starting definitions  #
+# # # # # # # # # # # # #
+
+years_to_run <- year <- 2026
+
+
+
+
+if( Sys.Date() > '2025-11-09' ){
+
+	stop( "alaska not available in the september penetration files (see readme)" )
+
+	# https://www.cms.gov/data-research/statistics-trends-and-reports/medicare-advantagepart-d-contract-and-enrollment-data/ma-state/county-penetration/ma-state/county-penetration-2025-09
+	ma_penetration_fn <- "R:/Medicare Tracker/input/state_county_penetration_ma_2025_09/State_County_Penetration_MA_2025_09.csv"
+
+	# https://www.cms.gov/data-research/statistics-trends-and-reports/medicare-advantagepart-d-contract-and-enrollment-data/pdp-state/county-penetration/pdp-state/county-penetration-2025-09
+	pdp_penetration_fn <- "R:/Medicare Tracker/input/state_county_penetration_pdp_2025_09/State_County_Penetration_PDP_2025_09.csv"
+
+} else {
+
+	# https://www.cms.gov/data-research/statistics-trends-and-reports/medicare-advantagepart-d-contract-and-enrollment-data/ma-state/county-penetration/ma-state/county-penetration-2025-06
+	ma_penetration_fn <- "R:/Medicare Tracker/input/state_county_penetration_ma_2025_06/State_County_Penetration_MA_2025_06.csv"
+
+	# https://www.cms.gov/data-research/statistics-trends-and-reports/medicare-advantagepart-d-contract-and-enrollment-data/pdp-state/county-penetration/pdp-state/county-penetration-2025-06
+	pdp_penetration_fn <- "R:/Medicare Tracker/input/state_county_penetration_pdp_2025_06/State_County_Penetration_PDP_2025_06.csv"
+
+}
+
+
+penetration_save_fn <- 
+	paste0(
+		"R:/Medicare Tracker/output/" ,
+		gsub( "(.*)([0-9][0-9][0-9][0-9])_([0-9][0-9])\\.csv$" , "\\2\\3" , basename( ma_penetration_fn ) ) ,
+		" medicare beneficiaries by fips.rds"
+	)
+
+# https://data.cms.gov/summary-statistics-on-beneficiary-enrollment/medicare-and-medicaid-reports/medicare-monthly-enrollment
+medicare_enrollment_dashboard_fn <- "R:/Medicare Tracker/input/Medicare Monthly Enrollment Data_June 2025.csv"
+
+dashboard_save_fn <-
+	paste0(
+		"R:/Medicare Tracker/output/" ,
+		gsub( "Medicare Monthly Enrollment Data_(.*)\\.csv$" , "\\1" , basename( medicare_enrollment_dashboard_fn ) ) ,
+		" dashboard beneficiaries by fips.rds"
+	)
+
+# https://www.cms.gov/medicare/coverage/prescription-drug-coverage
+combined_landscape_fn <- "R:/Medicare Tracker/input/CY2026_Landscape_202509/CY2026_Landscape_202509.csv"
+
+# NOT USED to create fall availability files
+# cpsc_enrollment_fn <- "R:/Medicare Tracker/input/CPSC_Enrollment_2025_03/CPSC_Enrollment_Info_2025_03.csv"
+
+# NOT USED to create fall availability files
+# cpsc_contract_fn <- "R:/Medicare Tracker/input/CPSC_Enrollment_2025_03/CPSC_Contract_Info_2025_03.csv"
+
+# https://www.cms.gov/data-research/statistics-trends-and-reports/medicare-advantagepart-d-contract-and-enrollment-data/ma-plan-directory
+ma_contract_directory_fn <- "R:/Medicare Tracker/input/MA_Plan_Directory_2025_09/MA_Contract_directory_2025_09.csv"
+
+# https://www.cms.gov/data-research/statistics-trends-and-reports/medicare-advantagepart-d-contract-and-enrollment-data/pdp-plan-directory
+pdp_contract_directory_fn <- "R:/Medicare Tracker/input/PDP_Plan_Directory_2025_09/PDP_Contract_directory_2025_09.csv"
+
+# 2024 contains old connecticut fips, 2025 contains both old & new
+nber_xw_url <- "https://web.archive.org/web/20250511011029/https://data.nber.org/ssa-fips-state-county-crosswalk/2024/ssa_fips_state_county_2024.csv"
+
+usda_uic_2013_url <- "https://ers.usda.gov/sites/default/files/_laserfiche/DataFiles/53797/UrbanInfluenceCodes2013.xls?v=42652"
+
+usda_uic_2024_url <- "https://ers.usda.gov/sites/default/files/_laserfiche/DataFiles/53797/UrbanInfluencecodes2024.csv?v=72388"
+
+
+
+# https://www.cms.gov/data-research/statistics-trends-and-reports/medicare-advantagepart-d-contract-and-enrollment-data/benefits-data/pbp-benefits-2026
+# 2026 benefits files folder
+benefits_dir <- "R:/Medicare Tracker/input/pbp-benefits-2026/"
+
+
+# benefits file loading function
+load_benefits_fun <-
+	function( table_name , benefits_dir ){
+
+		benefits_fn <- paste0( benefits_dir , table_name , ".txt" )
+
+		benefits_tbl <- 
+			readr::read_delim( 
+				benefits_fn , 
+				delim = "\t" , 
+				guess_max = 10000 , 
+				quote = "" , 
+				show_col_types = FALSE 
+			)
+
+		stopifnot( nrow( benefits_tbl ) == R.utils::countLines( benefits_fn ) - 1 )
+
+		names( benefits_tbl )[ names( benefits_tbl ) == 'pbp_a_hnumber' ] <- 'contract_id'
+		
+		names( benefits_tbl )[ names( benefits_tbl ) == 'pbp_a_plan_identifier' ] <- 'plan_id'
+
+		data.frame( benefits_tbl )
+		
+	}
+
+
+# # # # # # # # # # # # # # # # # # # # # # # # # # #
+# library, function, and basic definitions loading  #
+# # # # # # # # # # # # # # # # # # # # # # # # # # #
+
+
+# install.packages( "stringr" )
+library(stringr)
+
+
+# basic function loading
+
+no.na <- function( z , value = FALSE ) { z[ is.na( z ) ] <- value ; z }
+
+remove_dollars <- 
+	function( z ){ 
+
+		w <- as.character( z )
+		
+		# replace $- with $0
+		w <- gsub( "\\$\\-" , "$0" , w )
+
+		# remove dollar signs and commas
+		w <- gsub( "\\$|," , "" , w )
+		
+		# replace parentheses with a negative sign
+		w <- gsub( "\\((.*)\\)" , "-\\1" , w )
+
+		w <- suppressWarnings( as.numeric( w ) )
+		
+		if( any( is.na( w ) & !( z %in% 'Not Applicable' ) ) ) { print( "these values were coerced to missing" ) ; print( table( z[ is.na( w ) ] , useNA = 'always' ) ) }
+		
+		w
+	}
+	
+
+numeric_stars <-
+	function( x ){
+		
+		stopifnot(
+			all(
+				!is.na( suppressWarnings( res <- as.numeric( x ) ) ) | 
+				x %in% c( 'Plan Too New To Be Measured' , 'Not Applicable' , 'Not Enough Data Available' )
+			)
+		)
+		
+		res
+	}
+	
+
+# hardcoded deductibles
+max_deduct <- 
+	structure(
+		list(
+			year = 2006:2026, 
+			ded_max = c(250L, 265L, 275L, 295L, 310L, 310L, 320L, 325L, 310L, 320L, 360L, 400L, 405L, 415L, 435L, 445L, 480L, 505L, 545L, 590L, 615L)
+		), 
+		.Names = c( "year" , "max_ded" ) , 
+		class = "data.frame" , 
+		row.names = c( NA , -20L )
+	)
+
+
+# hardcoded pdp regions
+pdp_regions <-
+	structure(
+		list(
+			pdp_region = 
+				c( "01", "01", "02", "02", "02", "02", "03", "04", "05", "05", "05", "06", "06", "07", "08", "09", "10", "11", "12", "12", "13", 
+				"14", "15", "15", "16", "17", "18", "19", "20", "21", "22", "23", "24", "25", "25", "25", "25", "25", "25", "25", "26", "27", 
+				"28", "29", "30", "30", "31", "31", "32", "33", "34", "AS", "GU", "MP", "PR", "VI") , 
+			stateab = 
+				c("ME", "NH", "CT", "VT", "MA", "RI", "NY", "NJ", "DE", "DC", "MD", "PA", "WV", "VA", "NC", "SC", "GA", "FL", "TN", "AL", "MI", 
+				"OH", "KY", "IN", "WI", "IL", "MO", "AR", "MS", "LA", "TX", "OK", "KS", "WY", "MN", "SD", "NE", "IA", "ND", "MT", "NM", "CO", 
+				"AZ", "NV", "WA", "OR", "UT", "ID", "CA", "HI", "AK", "AS", "GU", "MP", "PR", "VI")
+		) , 
+		row.names = c( NA , -56L ) , 
+		class = "data.frame"
+	)
+
+
+
+
+# # # # # # # # # # # # # # # # # #
+# LOAD & RECODE GEOGRAPHIC FILES  #
+# # # # # # # # # # # # # # # # # #
+
+nber_xw_df <- read.csv( nber_xw_url )
+stopifnot( nrow( nber_xw_df ) == 3279 )
+
+
+tf <- tempfile()
+download.file( usda_uic_2013_url , tf , mode = 'wb' )
+usda_uic_2013_df <- data.frame( readxl::read_excel( tf ) )
+stopifnot( nrow( usda_uic_2013_df ) == 3221 )
+usda_uic_2013_df <- usda_uic_2013_df[ c( 'FIPS' , 'UIC_2013' , 'Description' ) ]
+names( usda_uic_2013_df ) <- c( 'fips' , 'uic_2013' , 'uic_2013_desc' )
+usda_uic_2013_df[ , 'fips' ] <- as.numeric( usda_uic_2013_df[ , 'fips' ] )
+
+usda_uic_2013_df[ , 'uic_2013_cat' ] <-
+	c( 1 , 2 , 1 , 1 , 2 , 2 , 2 , 3 , 3 , 3 , 3 , 3 )[ usda_uic_2013_df[ , 'uic_2013' ] ]
+
+usda_uic_2013_df[ , 'uic_2013_metro' ] <-
+	c( 1 , 1 , 1 , 1 , 1 , 1 , 1 , 0 , 0 , 0 , 0 , 0 )[ usda_uic_2013_df[ , 'uic_2013' ] ]
+
+usda_uic_2013_df[ , 'uic_2013_cat_desc' ] <-
+	factor( 
+		usda_uic_2013_df[ , 'uic_2013_cat' ] , 
+		levels = 1:3 , 
+		labels = c( 'Large metropolitan and adjacent counties' , 'Small metropolitan and adjacent counties' , 'Not adjacent to metropolitan counties' ) 
+	)
+
+
+usda_uic_2013_df[ , 'uic_2013_ur' ] <-
+	c( 1 , 1 , 2 , 2 , 2 , 2 , 2 , 3 , 3 , 3 , 3 , 3 )[ usda_uic_2013_df[ , 'uic_2013' ] ]
+
+
+usda_uic_2013_df[ , 'uic_2013_ur_desc' ] <-
+	factor( 
+		usda_uic_2013_df[ , 'uic_2013_ur' ] , 
+		levels = 1:3 , 
+		labels = c( 'urban' , 'rural adjacent' , 'rural non adjacent' ) 
+	)
+
+
+
+
+usda_uic_2013_df[ , 'uic_2013_xw_2024' ] <-
+	c( 1 , 4 , 2 , 3 , 5 , 6 , 6 , 7 , 8 , 9 , 8 , 9 )[ usda_uic_2013_df[ , 'uic_2013' ] ]
+
+
+
+usda_uic_2024_df <- read.csv( usda_uic_2024_url )
+usda_uic_2024_value_df <- usda_uic_2024_df[ usda_uic_2024_df[ , 'Attribute' ] %in% 'UIC_2024' , c( 'FIPS.UIC' , 'Value' ) ]
+names( usda_uic_2024_value_df )[ 2 ] <- 'UIC_2024'
+usda_uic_2024_desc_df <- usda_uic_2024_df[ usda_uic_2024_df[ , 'Attribute' ] %in% 'Description' , c( 'FIPS.UIC' , 'Value' ) ]
+names( usda_uic_2024_desc_df )[ 2 ] <- 'UIC_Desc_2024'
+usda_uic_2024_df <- merge( usda_uic_2024_value_df , usda_uic_2024_desc_df )
+stopifnot( nrow( usda_uic_2024_df ) == 3233 )
+names( usda_uic_2024_df ) <- c( 'fips' , 'uic_2024' , 'uic_2024_desc' )
+usda_uic_2024_df[ , 'uic_2024' ] <- as.numeric( usda_uic_2024_df[ , 'uic_2024' ] )
+usda_uic_2024_df[ , 'uic_2024_cat' ] <-
+	c( 1 , 1 , 1 , 2 , 2 , 2 , 3 , 3 , 3 )[ usda_uic_2024_df[ , 'uic_2024' ] ]
+
+usda_uic_2024_df[ , 'uic_2024_metro' ] <-
+	c( 1 , 1 , 1 , 1 , 1 , 1 , 0 , 0 , 0 )[ usda_uic_2024_df[ , 'uic_2024' ] ]
+
+usda_uic_2024_df[ , 'uic_2024_cat_desc' ] <-
+	factor( 
+		usda_uic_2024_df[ , 'uic_2024_cat' ] , 
+		levels = 1:3 , 
+		labels = c( 'Large metropolitan and adjacent counties' , 'Small metropolitan and adjacent counties' , 'Not adjacent to metropolitan counties' ) 
+	)
+
+
+
+usda_uic_2024_df[ , 'uic_2024_ur' ] <-
+	c( 1 , 2 , 2 , 1 , 2 , 2 , 3 , 3 , 3 )[ usda_uic_2024_df[ , 'uic_2024' ] ]
+
+
+usda_uic_2024_df[ , 'uic_2024_ur_desc' ] <-
+	factor( 
+		usda_uic_2024_df[ , 'uic_2024_ur' ] , 
+		levels = 1:3 , 
+		labels = c( 'urban' , 'rural adjacent' , 'rural non adjacent' ) 
+	)
+
+
+usda_uic_2024_cats <- unique( usda_uic_2024_df[ c( 'uic_2024' , 'uic_2024_desc' ) ] )
+
+names( usda_uic_2024_cats ) <- c( 'uic_2013_xw_2024' , 'uic_2013_xw_2024_desc' )
+
+usda_uic_2013_df <- merge( usda_uic_2013_df , usda_uic_2024_cats )
+
+
+# # # # # # # # # # # # #
+# CONNECTICUT EXCEPTION #
+# # # # # # # # # # # # #
+
+# load old connecticut ssa & fips codes from the 2024 nber xwalk
+conn_xw_df <- subset( nber_xw_df , state_name == 'CONNECTICUT' )
+conn_xw_df[ , 'state_name' ] <- 'Connecticut'
+
+conn_xw_df[ , 'county' ] <- 
+	gsub(
+		"(?<=\\b)([a-z])" , 
+		"\\U\\1" , 
+		tolower( conn_xw_df[ , 'countyname_fips' ] ) , 
+		perl = TRUE
+	)
+	
+conn_xw_df <- conn_xw_df[ c( 'state_name' , 'county' , 'fipscounty' , 'ssa_code' ) ]
+names( conn_xw_df ) <- c( 'state_name' , 'county' , 'fips' , 'ssa' )
+conn_xw_df[ , 'ssa' ] <- as.numeric( conn_xw_df[ , 'ssa' ] )
+conn_xw_df[ , c( 'eligibles' , 'ma_enrolled' , 'pdp_enrolled' ) ] <- NA
+# one record per connecticut county, with missing penetration file variables
+
+
+# # # # # # # # # # #
+# penetration files #
+# # # # # # # # # # #
+
+
+# combine penetration files #
+map_df <- read.csv( ma_penetration_fn )
+
+pdpp_df <- read.csv( pdp_penetration_fn )
+
+if( Sys.Date() > '2026-01-01' ) stop( "these penetration files have no connecticut records, try subset(map_df,State.Name=='Connecticut') and subset(pdpp_df,State.Name=='Connecticut')" )
+
+names( map_df ) <- names( pdpp_df ) <- c( "state_name" , "county" , "fipsst" , "fipscnty" , "fips" , "ssast" , "ssacnty" , "ssa" , "eligibles" , "enrolled" , "penetration" )
+
+map_df[ , 'penetration' ] <- pdpp_df[ , 'penetration' ] <- NULL
+
+names( map_df )[ names( map_df ) == 'enrolled' ] <- 'ma_enrolled'
+
+names( pdpp_df )[ names( pdpp_df ) == 'enrolled' ] <- 'pdp_enrolled'
+
+# aside from the final two columns, these files should be identical
+stopifnot( identical( map_df[ , -ncol( map_df ) ] , pdpp_df[ , -ncol( pdpp_df ) ] ) )
+
+
+pen_df <- merge( map_df , pdpp_df[ c( 'fips' , 'pdp_enrolled' ) ] )
+
+
+# hardcode all AS, GU, MP records into a single fips & ssa code for collapsing
+pen_df[ pen_df[ , 'state_name' ] == 'American Samoa' , 'county' ] <- 'American Samoa'
+pen_df[ pen_df[ , 'state_name' ] == 'American Samoa' , 'fips' ] <- 60000
+pen_df[ pen_df[ , 'state_name' ] == 'American Samoa' , 'ssa' ] <- 64000
+
+pen_df[ pen_df[ , 'state_name' ] == 'Guam' , 'county' ] <- 'Guam'
+pen_df[ pen_df[ , 'state_name' ] == 'Guam' , 'fips' ] <- 66010
+pen_df[ pen_df[ , 'state_name' ] == 'Guam' , 'ssa' ] <- 98000
+
+pen_df[ pen_df[ , 'state_name' ] %in% 'Northern Mariana Islands' , 'county' ] <- 'Northern Mariana Islands'
+pen_df[ pen_df[ , 'state_name' ] %in% 'Northern Mariana Islands' , 'fips' ] <- 69085
+pen_df[ pen_df[ , 'state_name' ] %in% 'Northern Mariana Islands' , 'ssa' ] <- 63050
+
+# coerce character columns (with commas) to numeric
+pen_df[ c( "eligibles" , "ma_enrolled" , "pdp_enrolled" ) ] <- sapply( pen_df[ c( "eligibles" , "ma_enrolled" , "pdp_enrolled" ) ] , function( z ) as.numeric( gsub( "," , "" , gsub( "^\\*$|^$" , "0" , z ) ) ) )
+
+
+# only one record in this file has missing geographies, both state & county
+stopifnot( nrow( subset( pen_df , county == "Pending County Designation" ) ) == 1 )
+# this record will be thrown out, affecting less than 25,000 medicare beneficiaries nationwide
+stopifnot( sum( subset( pen_df , county == "Pending County Designation" )[ , 'eligibles' ] ) < 25000 )
+
+# save seven columns
+pen_df <- pen_df[ !( pen_df[ , 'county' ] %in% "Pending County Designation" ) , c( "state_name" , "county" , "fips" , "ssa" , "eligibles" , "ma_enrolled" , "pdp_enrolled" ) ]
+
+# this table is entirely non-missing
+stopifnot( all( !is.na( pen_df ) ) )
+
+before_nrow <- nrow( pen_df )
+
+# sum up eligibles & enrollment by the other four columns
+pen_df <- aggregate( cbind( eligibles , ma_enrolled , pdp_enrolled ) ~ state_name + county + fips + ssa , data = pen_df , sum )
+
+# with the september 2025 penetration file, only three MP counties collapse into one.  no other reductions
+stopifnot( nrow( pen_df ) + 2 == before_nrow )
+
+
+if( Sys.Date() > '2026-01-01' ) stop( "appending blank connecticut records" )
+pen_df <- rbind( pen_df , conn_xw_df )
+
+
+saveRDS( pen_df , file = penetration_save_fn )
+# end of penetration file creation #
+
+
+
+# # # # # # # # # # # # # # # # # # # # #
+# medicare enrollment dashboard loading #
+# # # # # # # # # # # # # # # # # # # # #
+
+
+medicare_enrollment_dashboard_df <- read.csv( medicare_enrollment_dashboard_fn )
+
+medicare_enrollment_dashboard_df[ medicare_enrollment_dashboard_df[ , 'BENE_FIPS_CD' ] %in% 60 , 'BENE_COUNTY_DESC' ] <- 'American Samoa'
+medicare_enrollment_dashboard_df[ medicare_enrollment_dashboard_df[ , 'BENE_FIPS_CD' ] %in% 60 , 'BENE_FIPS_CD' ] <- 60000
+
+medicare_enrollment_dashboard_df[ medicare_enrollment_dashboard_df[ , 'BENE_FIPS_CD' ] %in% 66 , 'BENE_COUNTY_DESC' ] <- 'Guam'
+medicare_enrollment_dashboard_df[ medicare_enrollment_dashboard_df[ , 'BENE_FIPS_CD' ] %in% 66 , 'BENE_FIPS_CD' ] <- 66010
+
+medicare_enrollment_dashboard_df[ medicare_enrollment_dashboard_df[ , 'BENE_FIPS_CD' ] %in% 69 , 'BENE_COUNTY_DESC' ] <- 'Northern Mariana Islands'
+medicare_enrollment_dashboard_df[ medicare_enrollment_dashboard_df[ , 'BENE_FIPS_CD' ] %in% 69 , 'BENE_FIPS_CD' ] <- 69085
+
+medicare_enrollment_dashboard_df <- subset( medicare_enrollment_dashboard_df , A_B_TOT_BENES != '*' )
+
+if( Sys.Date() > '2026-01-01' ) stop( "June 2025 or March 2026 denominator?" )
+medicare_enrollment_dashboard_df <- subset( medicare_enrollment_dashboard_df , YEAR == 2025 & MONTH == 'June' )
+
+medicare_enrollment_dashboard_df <- subset( medicare_enrollment_dashboard_df , BENE_COUNTY_DESC != 'Total' )
+
+medicare_enrollment_dashboard_df <- medicare_enrollment_dashboard_df[ c( 'YEAR' , 'MONTH' , 'BENE_FIPS_CD' , 'BENE_STATE_DESC' , 'BENE_COUNTY_DESC' , 'A_B_TOT_BENES' ) ]
+
+names( medicare_enrollment_dashboard_df )[ c( 3 , 4 , 5 ) ] <- c( 'fips' , 'state_name' , 'county' )
+
+options( warn = 2 )
+medicare_enrollment_dashboard_df[ , 'medicare_sample_a_and_b_with_territories' ] <-
+	as.integer( medicare_enrollment_dashboard_df[ , 'A_B_TOT_BENES' ] )
+options( warn = 1 )
+
+medicare_enrollment_dashboard_df <- medicare_enrollment_dashboard_df[ c( 'state_name' , 'county' , 'fips' , 'medicare_sample_a_and_b_with_territories' ) ]
+
+if( Sys.Date() > '2026-01-01' ) stop( "removing connecticut total" )
+connecticut_removal_df <- subset( medicare_enrollment_dashboard_df , fips >= 9000 & fips < 10000 ) # old fips codes
+medicare_enrollment_dashboard_df <- subset( medicare_enrollment_dashboard_df , !( fips >= 9000 & fips < 10000 ) )
+
+
+if( Sys.Date() > '2026-01-01' ) stop( "appending blank connecticut records" )
+dashboard_connecticut_df <- transform( conn_xw_df[ c( 'state_name' , 'county' , 'fips' ) ] , county = paste( county , 'County' ) )
+dashboard_connecticut_df[ , 'medicare_sample_a_and_b_with_territories' ] <- NA
+medicare_enrollment_dashboard_df <- rbind( medicare_enrollment_dashboard_df , dashboard_connecticut_df ) # new fips codes but missing enrollment
+
+saveRDS( medicare_enrollment_dashboard_df , file = dashboard_save_fn )
+
+
+
+# # # # # # # # # # # # # #
+# # benefit file loading  #
+# # # # # # # # # # # # # #{
+
+
+# table b1b
+b1b <- load_benefits_fun( "pbp_b1b_inpat_hosp" , benefits_dir = benefits_dir )
+b1b <- b1b[ c( 'contract_id' , 'plan_id' , 'segment_id' , 'pbp_b1b_bendesc_yn' , 'pbp_b1b_bendesc_ad_nmcs' ) ]
+b1b[ , 'any_ip_psyc' ] <- c( 'Yes' , 'No' )[ b1b[ , 'pbp_b1b_bendesc_yn' ] ]
+b1b[ , 'psyc_add_days' ] <- ifelse( substr( b1b[ , 'pbp_b1b_bendesc_ad_nmcs' ] , 1 , 1 ) == 1 , 'Yes' , ifelse( substr( b1b[ , 'pbp_b1b_bendesc_ad_nmcs' ] , 1 , 1 ) == 0 , 'No' , NA ) )
+b1b[ , 'psyc_nmc_stay' ] <- ifelse( substr( b1b[ , 'pbp_b1b_bendesc_ad_nmcs' ] , 2 , 2 ) == 1 , 'Yes' , ifelse( substr( b1b[ , 'pbp_b1b_bendesc_ad_nmcs' ] , 2 , 2 ) == 0 , 'No' , NA ) )
+b1b <- unique( b1b[ c( 'contract_id' , 'plan_id' , 'segment_id' , 'any_ip_psyc' , 'psyc_add_days' , 'psyc_nmc_stay' ) ] )
+
+
+
+# table Section D
+section_d <- load_benefits_fun( "pbp_Section_D" , benefits_dir = benefits_dir )
+
+section_d[ , 'rebate_ptb' ] <- as.numeric( section_d[ , 'pbp_d_mco_pay_reduct_yn' ] == 1 )
+
+section_d[ , 'ptb_rebcat' ] <- 
+	factor( 
+		1 + findInterval( section_d[ , 'pbp_d_mco_pay_reduct_amt' ] , c( 0.01 , seq( 10 , 100 , 10 ) ) ) ,
+		levels = 1:12 ,
+		labels = c( "$0.00" , paste0( "$" , seq( 0 , 90 , 10 ) , ".01 - $" , seq( 10 , 100 , 10 ) ) , '$100 or more' )
+	)
+
+section_d[ , 'cst_shr_red' ] <- as.numeric( section_d[ , 'pbp_d_rics_yn' ] == 1 )
+
+section_d[ , 'cst_shr_redcat' ] <- 
+	factor( 
+		1 + findInterval( section_d[ , 'pbp_d_rics_max_bene_amt_1' ] , c( 0.01 , seq( 10 , 100 , 10 ) ) ) ,
+		levels = 1:12 ,
+		labels = c( "$0.00" , paste0( "$" , seq( 0 , 90 , 10 ) , ".01 - $" , seq( 10 , 100 , 10 ) ) , '$100 or more' )
+	)
+
+section_d <- unique( section_d[ c( 'contract_id' , 'plan_id' , 'segment_id' , 'rebate_ptb' , 'ptb_rebcat' , 'cst_shr_red' , 'cst_shr_redcat' ) ] )
+
+
+# table b18
+b18 <- load_benefits_fun( "pbp_b18_hearing_exams_aids" , benefits_dir = benefits_dir )
+	
+stopifnot( all( b18[ , 'pbp_b18a_bendesc_yn' ] %in% c( 1 , 2 , NA ) ) )
+b18[ , 'any_hearing_exam' ] <- as.numeric( b18[ , 'pbp_b18a_bendesc_yn' ] %in% 1 )
+stopifnot( all( b18[ , 'pbp_b18b_bendesc_yn' ] %in% c( 1 , 2 , NA ) ) )
+b18[ , 'any_hearing_aids' ] <- as.numeric( b18[ , 'pbp_b18b_bendesc_yn' ] %in% 1 )
+b18[ , 'any_hearing_exam_or_aids' ] <- as.numeric( b18[ , 'pbp_b18a_bendesc_yn' ] %in% 1 | b18[ , 'pbp_b18b_bendesc_yn' ] %in% 1 )
+b18[ , 'mo_hearing_exam' ] <- ifelse( b18[ , 'pbp_b18a_bendesc_amo_rht' ] %in% 2 , 'mandatory' , ifelse( b18[ , 'pbp_b18a_bendesc_amo_rht' ] %in% 3 , 'optional' , NA ) )
+b18[ , 'mo_fitting' ] <- ifelse( b18[ , 'pbp_b18a_bendesc_amo_fha' ] %in% 2 , 'mandatory' , ifelse( b18[ , 'pbp_b18a_bendesc_amo_fha' ] %in% 3 , 'optional' , NA ) )
+b18[ , 'mo_hearing_aids' ] <- ifelse( b18[ , 'pbp_b18b_bendesc_amo_at' ] %in% 2 , 'mandatory' , ifelse( b18[ , 'pbp_b18b_bendesc_amo_at' ] %in% 3 , 'optional' , NA ) )
+b18[ , 'mo_inner_aid' ] <- ifelse( b18[ , 'pbp_b18b_bendesc_amo_ie' ] %in% 2 , 'mandatory' , ifelse( b18[ , 'pbp_b18b_bendesc_amo_ie' ] %in% 3 , 'optional' , NA ) )
+b18[ , 'mo_outer_aid' ] <- ifelse( b18[ , 'pbp_b18b_bendesc_amo_oe' ] %in% 2 , 'mandatory' , ifelse( b18[ , 'pbp_b18b_bendesc_amo_oe' ] %in% 3 , 'optional' , NA ) )
+b18[ , 'mo_over_aid' ] <- ifelse( b18[ , 'pbp_b18b_bendesc_amo_ote' ] %in% 2 , 'mandatory' , ifelse( b18[ , 'pbp_b18b_bendesc_amo_ote' ] %in% 3 , 'optional' , NA ) )
+b18 <- unique( b18[ c( "contract_id" , "plan_id" , "segment_id" , "any_hearing_exam" , "any_hearing_aids" , "any_hearing_exam_or_aids" ,"mo_hearing_exam", "mo_fitting", "mo_hearing_aids", "mo_inner_aid", 
+"mo_outer_aid", "mo_over_aid" ) ] )
+
+
+# table 10
+b10 <- load_benefits_fun( "pbp_b10_amb_trans" , benefits_dir = benefits_dir )
+stopifnot( all( b10[ , 'pbp_b10b_bendesc_yn' ] %in% c( 1 , 2 , NA ) ) )
+b10[ , 'any_supp_transport' ] <- as.numeric( b10[ , 'pbp_b10b_bendesc_yn' ] %in% 1 )
+b10 <- unique( b10[ c( "contract_id" , "plan_id" , "segment_id" , "any_supp_transport" ) ] )
+
+# table b13	
+b13 <- load_benefits_fun( "pbp_b13_other_services" , benefits_dir = benefits_dir )
+stopifnot( all( b13[ , 'pbp_b13a_bendesc_yn' ] %in% c( 1 , 2 , NA ) ) )
+b13[ , 'any_acupuncture' ] <- as.numeric( b13[ , 'pbp_b13a_bendesc_yn' ] %in% 1 )
+b13[ , 'mo_acupuncture' ] <- ifelse( b13[ , 'pbp_b13a_bendesc_amo' ] %in% 2 , 'mandatory' , ifelse( b13[ , 'pbp_b13a_bendesc_amo' ] %in% 3 , 'optional' , NA ) )
+stopifnot( all( b13[ , 'pbp_b13b_bendesc_otc' ] %in% c( 1 , 2 , NA ) ) )
+b13[ , 'any_otc_drugs' ] <- as.numeric( b13[ , 'pbp_b13b_bendesc_otc' ] %in% 1 )
+b13[ , 'mo_otc_drugs' ] <- ifelse( b13[ , 'pbp_b13b_bendesc_amo' ] %in% 2 , 'mandatory' , ifelse( b13[ , 'pbp_b13b_bendesc_amo' ] %in% 3 , 'optional' , NA ) )
+stopifnot( all( b13[ , 'pbp_b13c_bendesc_service' ] %in% c( 1 , 2 , NA ) ) )
+b13[ , 'any_meal_benefit' ] <- as.numeric( b13[ , 'pbp_b13c_bendesc_service' ] %in% 1 )
+b13[ , 'mo_meal_benefit' ] <- ifelse( b13[ , 'pbp_b13c_bendesc_amo' ] %in% 2 , 'mandatory' , ifelse( b13[ , 'pbp_b13c_bendesc_amo' ] %in% 3 , 'optional' , NA ) )
+b13 <- unique( b13[ c( "contract_id" , "plan_id" , "segment_id" , "any_acupuncture" , "any_otc_drugs" , "any_meal_benefit" , 'mo_acupuncture' , 'mo_otc_drugs' , 'mo_meal_benefit' ) ] )
+
+
+
+# table b7
+b7 <- load_benefits_fun( "pbp_b7_health_prof" , benefits_dir = benefits_dir )
+b7[ , 'any_telehealth_basic' ] <- as.numeric( b7[ , 'pbp_b7j_bendesc_yn' ] %in% 1 )
+b7 <- b7[ c( 'contract_id' , 'plan_id' , 'segment_id' , 'any_telehealth_basic' ) ]
+b7 <- unique( b7[ c( "contract_id" , "plan_id" , "segment_id" , "any_telehealth_basic" ) ] )
+
+
+# table b14
+b14 <- load_benefits_fun( "pbp_b14_preventive" , benefits_dir = benefits_dir )
+pbp_b14c_bendesc_ehc <- strsplit( b14[ , "pbp_b14c_bendesc_ehc" ] , ";" )
+for( i in seq( 1 , 22 ) ) b14[ , paste0( 'b14c' , i ) ] <- sapply( pbp_b14c_bendesc_ehc , function( z ) as.numeric( paste0( '14c' , i ) %in% z ) )
+
+b14[ , 'any_smoking' ] <- b14[ , 'b14c3' ]
+b14[ , 'any_enhanced_fitness' ] <- b14[ , 'b14c4' ]
+
+b14[ , 'any_caregiver_support' ] <- b14[ , 'b14c22' ]
+b14[ , 'any_telemonitoring' ] <- b14[ , 'b14c6' ]
+b14[ , 'any_bathroom_safety' ] <- b14[ , 'b14c8' ]
+b14[ , 'any_inhome_support' ] <- b14[ , 'b14c21' ]
+b14[ , 'any_remote' ] <- b14[ , 'b14c7' ]
+
+b14[ , 'mo_enhanced_fitness' ] <- ifelse( b14[ , 'pbp_b14c_bendesc_amo_mhc' ] %in% 2 , 'mandatory' , ifelse( b14[ , 'pbp_b14c_bendesc_amo_mhc' ] %in% 3 , 'optional' , NA ) )
+b14[ , 'mo_telemonitoring' ] <- ifelse( b14[ , 'pbp_b14c_bendesc_amo_tm' ] %in% 2 , 'mandatory' , ifelse( b14[ , 'pbp_b14c_bendesc_amo_tm' ] %in% 3 , 'optional' , NA ) )
+b14[ , 'mo_bathroom_safety' ] <- ifelse( b14[ , 'pbp_b14c_bendesc_amo_bsd' ] %in% 2 , 'mandatory' , ifelse( b14[ , 'pbp_b14c_bendesc_amo_bsd' ] %in% 3 , 'optional' , NA ) )
+b14[ , 'mo_inhome_support' ] <- ifelse( b14[ , 'pbp_b14c_bendesc_ihss' ] %in% 2 , 'mandatory' , ifelse( b14[ , 'pbp_b14c_bendesc_ihss' ] %in% 3 , 'optional' , NA ) )
+b14[ , 'mo_remote' ] <- ifelse( b14[ , 'pbp_b14c_bendesc_sce' ] %in% 2 , 'mandatory' , ifelse( b14[ , 'pbp_b14c_bendesc_sce' ] %in% 3 , 'optional' , NA ) )
+b14[ , 'mo_caregiver_support' ] <- ifelse( b14[ , 'pbp_b14c_bendesc_amo_rat' ] %in% 2 , 'mandatory' , ifelse( b14[ , 'pbp_b14c_bendesc_amo_rat' ] %in% 3 , 'optional' , NA ) )
+b14 <- unique( b14[ c( "contract_id" , "plan_id" , "segment_id" , "any_enhanced_fitness" , "any_caregiver_support" , "any_inhome_support" , "any_telemonitoring" , "any_remote" , "any_bathroom_safety" , "any_smoking" , 'mo_enhanced_fitness' , 'mo_telemonitoring' , 'mo_bathroom_safety' , 'mo_inhome_support' , 'mo_remote' , 'mo_caregiver_support' ) ] )
+
+
+
+
+b16 <- load_benefits_fun( "pbp_b16_dental" , benefits_dir = benefits_dir )
+
+b16[ , 'any_dental_preventive' ] <- as.numeric( b16[ , 'pbp_b16b_maxplan_pv_yn' ] %in% 1:2 )
+
+b16[ , 'any_dental_comprehensive' ] <- as.numeric( b16[ , 'pbp_b16c_maxplan_cmp_yn' ] %in% 1:2 )
+
+b16[ , 'mo_oral_exam' ] <- c( NA , 'mandatory' , 'optional' , 'both' )[ b16[ , 'pbp_b16b_bendesc_oe_amo' ] ]
+b16[ , 'mo_cleanings' ] <- c( NA , 'mandatory' , 'optional' , 'both' )[ b16[ , 'pbp_b16b_bendesc_pc_amo' ] ]
+b16[ , 'mo_flouride' ] <- c( NA , 'mandatory' , 'optional' , 'both' )[ b16[ , 'pbp_b16b_bendesc_ft_amo' ] ]
+b16[ , 'mo_xrays' ] <- c( NA , 'mandatory' , 'optional' , 'both' )[ b16[ , 'pbp_b16b_bendesc_dx_amo' ] ]
+b16[ , 'mo_restorative' ] <- c( NA , 'mandatory' , 'optional' , 'both' )[ b16[ , 'pbp_b16c_bendesc_rs_amo' ] ]
+b16[ , 'mo_periodontics' ] <- c( NA , 'mandatory' , 'optional' , 'both' )[ b16[ , 'pbp_b16c_bendesc_peri_amo' ] ]
+b16[ , 'mo_endodontics' ] <- c( NA , 'mandatory' , 'optional' , 'both' )[ b16[ , 'pbp_b16c_bendesc_end_amo' ] ]
+
+
+for( this_abbrev in c( 'ods' , 'ops' , 'prm' , 'mxpr' , 'impl' , 'prf' , 'omsg' , 'orth' , 'ags' ) ){
+
+	b16[ , paste0( 'mo_' , this_abbrev ) ] <- 
+		c( NA , 'mandatory' , 'optional' , 'both' )[ 
+			b16[ , 
+				paste0( 
+					'pbp_b16' , 
+					if( this_abbrev %in% c( 'ods' , 'ops' ) ) 'b' else 'c' , 
+					'_bendesc_' , 
+					this_abbrev , 
+					'_amo' 
+				) 
+			] 
+		]
+
+}
+
+
+b16 <- unique( b16[ c( "contract_id" , "plan_id" , "segment_id" , "any_dental_preventive" , "any_dental_comprehensive" , grep( '^mo_' , names( b16 ) , value = TRUE ) ) ] )
+
+
+
+
+
+
+
+
+
+# table b17
+b17 <- load_benefits_fun( "pbp_b17_eye_exams_wear" , benefits_dir = benefits_dir )
+
+b17[ , 'any_eyeexam' ] <- as.numeric( b17[ , 'pbp_b17a_bendesc_yn' ] %in% 1 )
+b17[ , 'any_eyewear' ] <- as.numeric( b17[ , 'pbp_b17b_bendesc_yn' ] %in% 1 )
+b17[ , 'mo_eyeexam' ] <- ifelse( b17[ , 'pbp_b17a_bendesc_amo_rex' ] %in% 2 , 'mandatory' , ifelse( b17[ , 'pbp_b17a_bendesc_amo_rex' ] %in% 3 , 'optional' , NA ) )
+b17[ , 'mo_eyesvc' ] <- ifelse( b17[ , 'pbp_b17a_bendesc_amo_other' ] %in% 2 , 'mandatory' , ifelse( b17[ , 'pbp_b17a_bendesc_amo_other' ] %in% 3 , 'optional' , NA ) )
+b17[ , 'mo_contacts' ] <- ifelse( b17[ , 'pbp_b17b_bendesc_amo_cl' ] %in% 2 , 'mandatory' , ifelse( b17[ , 'pbp_b17b_bendesc_amo_cl' ] %in% 3 , 'optional' , NA ) )
+b17[ , 'mo_lensframe' ] <- ifelse( b17[ , 'pbp_b17b_bendesc_amo_egs' ] %in% 2 , 'mandatory' , ifelse( b17[ , 'pbp_b17b_bendesc_amo_egs' ] %in% 3 , 'optional' , NA ) )
+b17[ , 'mo_lenses' ] <- ifelse( b17[ , 'pbp_b17b_bendesc_amo_egi' ] %in% 2 , 'mandatory' , ifelse( b17[ , 'pbp_b17b_bendesc_amo_egi' ] %in% 3 , 'optional' , NA ) )
+b17[ , 'mo_frames' ] <- ifelse( b17[ , 'pbp_b17b_bendesc_amo_egf' ] %in% 2 , 'mandatory' , ifelse( b17[ , 'pbp_b17b_bendesc_amo_egf' ] %in% 3 , 'optional' , NA ) )
+b17[ , 'mo_upgrades' ] <- ifelse( b17[ , 'pbp_b17b_bendesc_amo_upg' ] %in% 2 , 'mandatory' , ifelse( b17[ , 'pbp_b17b_bendesc_amo_upg' ] %in% 3 , 'optional' , NA ) )
+b17 <- unique( b17[ c( "contract_id" , "plan_id" , "segment_id" , "any_eyeexam" , 'mo_eyeexam' , 'mo_eyesvc' ,  "any_eyewear" , 'mo_contacts' , 'mo_lensframe' , 'mo_lenses' , 'mo_frames' , 'mo_upgrades' ) ] )
+
+
+stopifnot( nrow( b14 ) == nrow( unique( b14[ c( "contract_id" , "plan_id" , "segment_id" ) ] ) ) )
+
+stopifnot( nrow( b16 ) == nrow( unique( b16[ c( "contract_id" , "plan_id" , "segment_id" ) ] ) ) )
+
+stopifnot( nrow( b17 ) == nrow( unique( b17[ c( "contract_id" , "plan_id" , "segment_id" ) ] ) ) )
+
+stopifnot( nrow( b18 ) == nrow( unique( b18[ c( "contract_id" , "plan_id" , "segment_id" ) ] ) ) )
+
+stopifnot( nrow( b10 ) == nrow( unique( b10[ c( "contract_id" , "plan_id" , "segment_id" ) ] ) ) )
+
+stopifnot( nrow( b13 ) == nrow( unique( b13[ c( "contract_id" , "plan_id" , "segment_id" ) ] ) ) )
+
+stopifnot( nrow( b1b ) == nrow( unique( b1b[ c( "contract_id" , "plan_id" , "segment_id" ) ] ) ) )
+
+
+
+benefits_df <- merge( b14 , b16 )
+benefits_df <- merge( benefits_df , b17 )
+stopifnot( nrow( benefits_df ) == nrow( b14 ) )
+benefits_df <- merge( benefits_df , b18 )
+stopifnot( nrow( benefits_df ) == nrow( b14 ) )
+benefits_df <- merge( benefits_df , b10 )
+stopifnot( nrow( benefits_df ) == nrow( b14 ) )
+benefits_df <- merge( benefits_df , b13 )
+stopifnot( nrow( benefits_df ) == nrow( b14 ) )
+benefits_df <- merge( benefits_df , section_d )
+stopifnot( nrow( benefits_df ) == nrow( section_d ) )
+benefits_df <- merge( benefits_df , b1b )
+stopifnot( nrow( benefits_df ) == nrow( b14 ) )
+stopifnot( nrow( benefits_df ) == nrow( b1b ) )
+benefits_df <- merge( benefits_df , b7 )
+stopifnot( nrow( benefits_df ) == nrow( b14 ) )
+
+
+
+
+
+# table b19
+b19 <- load_benefits_fun( "pbp_b19_model_test" , benefits_dir = benefits_dir )
+stopifnot( all( b19[ , 'pbp_b19a_ssbci_yn' ] %in% c( 1 , 2 , NA ) ) )
+b19[ , 'b19a_mt_ssbci' ] <- as.numeric( b19[ , 'pbp_b19a_ssbci_yn' ] %in% 1 )
+b19[ , 'b19a_mt_addl_benefits' ] <- as.numeric( substr( b19[ , 'pbp_b19a_ssbci_bendesc' ] , 1 , 1 ) %in% 1 )
+b19[ , 'b19a_mt_reduced_cost' ] <- as.numeric( substr( b19[ , 'pbp_b19a_ssbci_bendesc' ] , 2 , 2 ) %in% 1 )
+stopifnot( all( b19[ , 'pbp_b19b_add_cost_yn' ] %in% c( 1 , 2 , NA ) ) )
+b19[ , 'b19b_mt_ssbci' ] <- as.numeric( b19[ , 'pbp_b19b_add_cost_yn' ] %in% 1 )
+b19 <- unique( b19[ c( "contract_id" , "plan_id" , "segment_id" , "b19a_mt_ssbci" , "b19a_mt_addl_benefits" , "b19a_mt_reduced_cost" , "b19b_mt_ssbci" ) ] )
+
+
+# table b13i_b19b
+b13i_b19b <- load_benefits_fun( "pbp_b13i_b19b_services_vbid_ssbci" , benefits_dir = benefits_dir )
+b13i_b19b[ , 'ssbci_food' ] <- as.numeric( substr( b13i_b19b[ , 'pbp_b13i_bendesc' ] , 2 , 2 ) %in% 1 )
+b13i_b19b[ , 'ssbci_meals' ] <- as.numeric( substr( b13i_b19b[ , 'pbp_b13i_bendesc' ] , 3 , 3 ) %in% 1 )
+b13i_b19b[ , 'ssbci_pest' ] <- as.numeric( substr( b13i_b19b[ , 'pbp_b13i_bendesc' ] , 4 , 4 ) %in% 1 )
+b13i_b19b[ , 'ssbci_transp' ] <- as.numeric( substr( b13i_b19b[ , 'pbp_b13i_bendesc' ] , 5 , 5 ) %in% 1 )
+b13i_b19b[ , 'ssbci_airq' ] <- as.numeric( substr( b13i_b19b[ , 'pbp_b13i_bendesc' ] , 6 , 6 ) %in% 1 )
+b13i_b19b[ , 'ssbci_social' ] <- as.numeric( substr( b13i_b19b[ , 'pbp_b13i_bendesc' ] , 7 , 7 ) %in% 1 )
+b13i_b19b[ , 'ssbci_therap' ] <- as.numeric( substr( b13i_b19b[ , 'pbp_b13i_bendesc' ] , 8 , 8 ) %in% 1 )
+b13i_b19b[ , 'ssbci_serv' ] <- as.numeric( substr( b13i_b19b[ , 'pbp_b13i_bendesc' ] , 9 , 9 ) %in% 1 )
+b13i_b19b[ , 'ssbci_struct' ] <- as.numeric( substr( b13i_b19b[ , 'pbp_b13i_bendesc' ] , 10 , 10 ) %in% 1 )
+b13i_b19b[ , 'ssbci_supports' ] <- as.numeric( substr( b13i_b19b[ , 'pbp_b13i_bendesc' ] , 1 , 1 ) %in% 1 )
+b13i_b19b[ , 'b13i_ssbci' ] <- 1
+
+
+
+b13i_b19b <- unique( b13i_b19b[ c( "contract_id" , "plan_id" , "segment_id" , "b13i_ssbci" , "ssbci_food" , "ssbci_meals" , "ssbci_pest" , "ssbci_transp" , "ssbci_airq" , "ssbci_social" , "ssbci_therap" , "ssbci_serv" , "ssbci_struct" , "ssbci_supports" ) ] )
+
+b13i_vars <- setdiff( names( b13i_b19b ) , c( names( b19 ) , 'b13i_ssbci' ) )
+
+
+b13i_b19b_collapsed <-
+	sqldf::sqldf(
+		paste0( 
+			"SELECT contract_id , plan_id , segment_id , b13i_ssbci , " ,
+			paste0( "MIN( " , b13i_vars , " ) AS min_" , b13i_vars , " , MAX( " , b13i_vars , " ) AS max_" , b13i_vars , collapse = " , " ) ,
+			" FROM b13i_b19b GROUP BY contract_id , plan_id , segment_id , b13i_ssbci"
+		)
+	)
+	
+stopifnot( nrow( b13i_b19b_collapsed ) == nrow( unique( b13i_b19b_collapsed[ c( 'contract_id' , 'plan_id' , 'segment_id' ) ] ) ) )
+
+
+before_nrow <- nrow( b19 )
+b19 <- merge( b19 , b13i_b19b_collapsed , all.x = TRUE )
+stopifnot( nrow( b19 ) == before_nrow )
+stopifnot( all( is.na( b19[ b19[ , 'b19b_mt_ssbci' ] %in% 0 , c( paste0( 'min_' , b13i_vars ) , paste0( 'max_' , b13i_vars ) ) ] ) ) )
+b19[ is.na( b19 ) ] <- 0
+
+
+stopifnot( nrow( b19 ) == nrow( unique( b19[ c( "contract_id" , "plan_id" , "segment_id" ) ] ) ) )
+
+benefits_df <- merge( benefits_df , b19 )
+stopifnot( nrow( benefits_df ) == nrow( b19 ) )
+stopifnot( nrow( benefits_df ) == nrow( b14 ) )
+
+benefits_df[ , 'any_fit_dent_eye' ] <- apply( benefits_df[ , c( 'any_enhanced_fitness' , 'any_dental_preventive' , 'any_dental_comprehensive' , 'any_eyeexam' , 'any_eyewear' ) ] , 1 , function( z ) as.numeric( any( z == 1 ) ) )
+
+benefits_df[ , 'all_fit_dent_eye' ] <- apply( benefits_df[ , c( 'any_enhanced_fitness' , 'any_dental_preventive' , 'any_dental_comprehensive' , 'any_eyeexam' , 'any_eyewear' ) ] , 1 , function( z ) as.numeric( all( z == 1 ) ) )
+benefits_df[ , 'any_fit_dent_eye_hearing' ] <- apply( benefits_df[ , c( 'any_enhanced_fitness' , 'any_dental_preventive' , 'any_dental_comprehensive' , 'any_eyeexam' , 'any_eyewear' , 'any_hearing_exam' , 'any_hearing_aids' ) ] , 1 , function( z ) as.numeric( any( z == 1 ) ) )
+benefits_df[ , 'all_fit_dent_eye_hearing' ] <- apply( benefits_df[ , c( 'any_enhanced_fitness' , 'any_dental_preventive' , 'any_dental_comprehensive' , 'any_eyeexam' , 'any_eyewear' , 'any_hearing_exam' , 'any_hearing_aids' ) ] , 1 , function( z ) as.numeric( all( z == 1 ) ) )
+
+benefits_df[ , 'plan_id' ] <- as.numeric( benefits_df[ , 'plan_id' ] )
+
+# end of benefit file creation #
+
+
+# # # # # # # # # # # # #
+# contract directories  #
+# # # # # # # # # # # # #
+
+# combine contract directories #
+ma_contract_directory_df <- read.csv( ma_contract_directory_fn )
+
+pdp_contract_directory_df <- read.csv( pdp_contract_directory_fn )
+
+
+# zero contracts ought to be in both
+stopifnot( length( intersect( ma_contract_directory_df[ , 'Contract.Number' ] , pdp_contract_directory_df[ , 'Contract.Number' ] ) ) == 0 )
+
+contract_directory_df <-
+	rbind( 
+		ma_contract_directory_df[ , c( 'Contract.Number' , 'Contract.Effective.Date' , 'Tax.Status' ) ] ,
+		pdp_contract_directory_df[ , c( 'Contract.Number' , 'Contract.Effective.Date' , 'Tax.Status' ) ]
+	)
+
+stopifnot( all( nchar( contract_directory_df[ , 'Contract.Effective.Date' ] ) == 10 ) )
+
+contract_directory_df[ , 'start_year' ] <- substr( contract_directory_df[ , 'Contract.Effective.Date' ] , 7 , 10 )
+
+contract_directory_df[ , 'ced' ] <- as.Date( contract_directory_df[ , 'Contract.Effective.Date' ] , "%m/%d/%Y" )
+
+stopifnot( all( contract_directory_df[ , 'start_year' ] %in% seq( 1970 , year ) ) )
+
+names( contract_directory_df )[ names( contract_directory_df ) == 'Tax.Status' ] <- 'ts'
+
+names( contract_directory_df )[ names( contract_directory_df ) == 'Contract.Number' ] <- 'contract_id'
+
+contract_directory_df <- contract_directory_df[ c( 'contract_id' , 'ts' , 'start_year' , 'ced' ) ]
+# end of combine contract directories #
+
+
+
+
+
+# # # # # # # # # # # # # # # # #
+# load & recode landscape files #
+# # # # # # # # # # # # # # # # #
+
+
+lsc_df <- read.csv( combined_landscape_fn )
+
+
+# clean up variable names
+
+field_loop <-
+	data.frame(
+		field_pattern =
+			c( 
+				"contract(.*)year" ,
+				"contract(.*)category(.*)type" ,
+				"plan(.*)type" ,
+				"organization(.*)type" ,
+				"part(.*)d(.*)total(.*)premium" ,
+				"part\\.c\\.premium" ,
+				"part(.*)d(.*)basic(.*)premium$" ,
+				"part(.*)d(.*)supplemental(.*)premium" ,
+				"annual(.*)part(.*)d(.*)deductible" ,
+				"below(.*)regional(.*)benchmark" ,
+				"part(.*)d(.*)low(.*)income(.*)premium(.*)amount" ,
+				"low(.*)income(.*)subsidy(.*)auto(.*)enrollment" ,
+				"de(.*)minimis(.*)program" ,
+				"integration(.*)status" ,
+				"aip(.*)identifier" ,
+				"snp(.*)institutional(.*)type" ,
+				"part(.*)d(.*)coverage(.*)indicator" ,
+				"^contract\\.(id|number)" ,
+				"^plan\\.id" ,
+				"^segment(.*)id" ,
+				"plan(.*)name" ,
+				"parent(.*)organization" ,
+				"drug(.*)benefit(.*)category" ,
+				"drug(.*)benefit(.*)type" ,
+				"snp(.*)indicator" ,
+				"organization(.*)marketing(.*)name" ,
+				"sanctioned(.*)plan" ,
+				"^snp\\.type$" ,
+				"state(.*)name" ,
+				"county(.*)name" ,
+				"state(.*)abbreviation" ,
+				"part(.*)c(.*)summary(.*)star(.*)rating" ,
+				"part(.*)d(.*)summary(.*)star(.*)rating" ,
+				"overall(.*)star(.*)rating" ,
+				"ma(.*)region$" ,
+				"ma(.*)region(.*)code" ,
+				"pdp(.*)region$" ,
+				"pdp(.*)region(.*)code" ,
+				"consolidated(.*)premium(.*)part(.*)c(.*)d" ,
+				"national(.*)pdp" ,
+				"maximum(.*)out(.*)of(.*)pocket(.*)amount" ,
+				"chronic(.*)snp(.*)condition(.*)type" ,
+				"zero(.*)dollar(.*)cost(.*)sharing(.*)d\\.snp" ,
+				"drug(.*)tier(.*)with(.*)no(.*)part(.*)d(.*)deductible" ,
+				"low(.*)income(.*)premium(.*)subsidy(.*)lips(.*)amount" ,
+				"part(.*)d(.*)lips(.*)cms(.*)pays" ,
+				"part(.*)d(.*)oop(.*)threshold"
+			) ,
+		field_rename =
+			c( 
+				"contract_year" ,
+				NA , # "contract_category_type" ,
+				"pt" ,
+				NA , # "organization_type" ,
+				"partd_premium" ,
+				"partc_premium" ,
+				"partd_basic_premium" ,
+				"partd_supp_premium" ,
+				"partd_deductible" ,
+				"below_regional_benchmark" ,
+				"partd_lis_premium" ,
+				"auto_enrollment" ,
+				"de_minimis" ,
+				"integration_status" ,
+				"aip" ,
+				"isnp_type" ,
+				"partd" ,
+				"contract_id" ,
+				"plan_id" ,
+				"segment_id" ,
+				"pname" ,
+				"po" ,
+				"dbt" ,
+				"detail" ,
+				"snp" ,
+				"mktname" ,
+				"sanctioned" ,
+				"snptype" ,
+				"state_name" ,
+				"county" ,
+				NA , # "stateab" ,
+				"partc_summary_star_original" ,
+				"partd_summary_star_original" ,
+				"star_original" ,
+				NA , # "ma_region" ,
+				NA , # "ma_region_code" ,
+				NA , # "pdp_region" , 
+				NA , # "pdp_region_code"
+				"premium" ,
+				"national_pdp" ,
+				"moop" ,
+				"csnp_type" ,
+				"dsnp_zero_cs" ,
+				"drug_tier_with_zero_deductible" ,
+				"low_income_premium_subsidy" ,
+				"partd_lips_cms_pays" ,
+				"partd_oop_threshold"
+			)
+	)
+	
+for( this_row in seq( nrow( field_loop ) ) ){
+
+	this_field_column <- 
+		grep( 
+			field_loop[ this_row , "field_pattern" ] ,
+			names( lsc_df ) ,
+			ignore.case = TRUE
+		)
+		
+	stopifnot( length( this_field_column ) == 1 )
+
+	# overwrite non-missings with recoded field name
+	if( !is.na( field_loop[ this_row , "field_rename" ] ) ){
+		
+		names( lsc_df )[ this_field_column ] <- 
+			field_loop[ this_row , "field_rename" ]
+			
+	} else lsc_df[ this_field_column ] <- NULL
+
+}
+
+
+
+if( Sys.Date() > '2025-11-09' ){
+
+	stop( "stars not yet available in the 202509 landscape file for 2026" )
+
+	# recode star ratings columns to numeric
+
+	lsc_df[ , 'star' ] <- numeric_stars( lsc_df[ , 'star_original' ] )
+	lsc_df[ , 'partc_summary_star' ] <- numeric_stars( lsc_df[ , 'partc_summary_star_original' ] )
+	lsc_df[ , 'partd_summary_star' ] <- numeric_stars( lsc_df[ , 'partd_summary_star_original' ] )
+
+} else {
+
+	lsc_df[ , 'star' ] <- NA_real_
+	lsc_df[ , 'partc_summary_star' ] <- NA_real_
+	lsc_df[ , 'partd_summary_star' ] <- NA_real_
+
+}
+
+
+
+
+# recode fields with dollar values to numeric
+
+remove_dollar_fields <-
+	c( 'premium' , 'partd_premium' , 'partd_supp_premium' , 'partd_lis_premium' , 'partd_deductible' , 'moop' , 'partc_premium' , 'partd_basic_premium' , 'partd_lips_cms_pays' , 'partd_oop_threshold' , 'low_income_premium_subsidy' )
+	
+lsc_df[ remove_dollar_fields ] <- sapply( lsc_df[ remove_dollar_fields ] , remove_dollars )
+
+lsc_df[ , 'sanctioned' ] <- as.numeric( lsc_df[ , 'sanctioned' ] == 'Yes' )
+
+# coerce "Not Applicable" to missing
+nonsnp_na_fields <- c( 'snptype' , 'isnp_type' , 'integration_status' , "aip" , "csnp_type" , "dsnp_zero_cs" )
+
+for( this_field in nonsnp_na_fields ) lsc_df[ lsc_df[ , 'snp' ] == 'No' , this_field ] <- NA
+
+
+nonpartd_na_fields <-
+	c( "national_pdp", "dbt", "detail", "de_minimis", "below_regional_benchmark", "auto_enrollment", "drug_tier_with_zero_deductible", "partd_deductible", 
+	"partd_basic_premium", "partd_supp_premium", "partd_premium", "low_income_premium_subsidy", "partd_lips_cms_pays", "partd_lis_premium", "partd_oop_threshold" )
+
+for( this_field in nonpartd_na_fields ) lsc_df[ lsc_df[ , 'partd' ] == 'No' , this_field ] <- NA
+
+
+
+
+
+# the penetration file uses Washington D.C. rather than District of Columbia
+stopifnot( any( pen_df[ , 'state_name' ] == "Washington D.C." ) )
+
+lsc_df[ , 'state_name' ] <- 
+	ifelse( 
+		lsc_df[ , 'state_name' ] == 'District of Columbia' ,
+		"Washington D.C." ,
+		lsc_df[ , 'state_name' ]
+	)
+
+	
+# the penetration file has a space in this county name
+stopifnot( any( pen_df[ , 'state_name' ] == "Indiana" & pen_df[ , 'county' ] == 'De Kalb' ) )
+
+lsc_df[ , 'county' ] <- 
+	ifelse( 
+		lsc_df[ , 'state_name' ] == 'Indiana' & lsc_df[ , 'county' ] == 'DeKalb' ,
+		"De Kalb" ,
+		lsc_df[ , 'county' ]
+	)
+
+stopifnot( all( unique( lsc_df[ , 'state_name' ] ) %in% c( state.name , 'Puerto Rico' , 'Washington D.C.' , "American Samoa" , "Guam" , "Northern Mariana Islands" , "Virgin Islands" ) ) )
+
+lsc_df[ , 'stateab' ] <- 
+	c( state.abb , "DC" , "PR" , "AS" , "GU" , "MP" , "VI" )[ 
+		match( lsc_df[ , 'state_name' ] , c( state.name , "Washington D.C." , "Puerto Rico" , "American Samoa" , "Guam" , "Northern Mariana Islands" , "Virgin Islands" ) ) 
+	]
+
+
+# plan type variable
+lsc_df[ grepl( '^HMO' , lsc_df[ , 'pt' ] ) , 'pt' ] <- 'Local HMO'
+lsc_df[ grepl( '^PPO' , lsc_df[ , 'pt' ] ) , 'pt' ] <- 'Local PPO'
+lsc_df[ grepl( '^Regional PPO' , lsc_df[ , 'pt' ] ) , 'pt' ] <- 'Regional PPO'
+lsc_df[ lsc_df[ , 'pt' ] == 'PDP' , 'pt' ] <- 'Medicare Prescription Drug Plan'
+
+# replace MSA missing premiums with zero premiums
+lsc_df[ lsc_df[ , 'pt' ] %in% 'MSA' , 'premium' ] <- 0
+
+lsc_df[ , 'zero_premium_plan' ] <- as.numeric( lsc_df[ , 'premium' ] == 0 )
+
+
+# exclude missing states AND medicare-medicaid plans, 1876 cost plans, and national pace plans
+lsc_df <- 
+	subset( 
+		lsc_df , 
+		!( pt %in% c( "Cost" , 'Medicare-Medicaid Plan' ) )
+	)
+
+# confirm plan type exclusions
+pt_options <- c("Local HMO", "Local PPO", "MSA", "PFFS", "Regional PPO" , 'Medicare Prescription Drug Plan' )
+
+stopifnot( all( lsc_df[ , 'pt' ] %in% pt_options ) )
+
+
+# "Employer/Union Only Direct Contract PDP" not needed here because eghps are not in the landscape files
+lsc_df[ , 'mapd_standalone' ] <- 
+	ifelse( lsc_df[ , 'partd' ] == 'No' , 'ma only' ,
+	ifelse( lsc_df[ , 'pt' ] == 'Medicare Prescription Drug Plan' , 'standalone pdp' , 
+		'ma-pd' ) )
+
+
+
+
+# create premium category
+lsc_df <- 
+	transform( 
+		lsc_df ,
+		premcat = 
+			factor( 
+				1 + findInterval( premium , c( 0.01 , seq( 10 , 100 , 10 ) ) ) , 
+				levels = 1:12 ,
+				labels = c( "Zero Premium" , paste0( "$" , c( 0.01 , seq( 10 , 90 , 10 ) ) , " to $" , seq( 9.99 , 99.99 , 10 ) ) , "$100 or more" ) 
+			)
+	)
+
+# check
+with( lsc_df , tapply( premium , premcat , summary ) )
+
+	
+
+
+# create drug deductible category
+lsc_df <- 
+	transform( 
+		lsc_df , 
+		deductible_nosnp = 
+			ifelse( 
+				partd == 'No' | snp == 'Yes' , 
+				NA , 
+				partd_deductible
+			)
+	)
+
+lsc_df <- 
+	transform( 
+		lsc_df ,
+		dedcat = 
+			ifelse( deductible_nosnp < 0 , "mistake" , 
+			ifelse( deductible_nosnp == 0 , "1 - $0" , 
+			ifelse( deductible_nosnp <= 200 , "2 - $1 to $200" , 
+			ifelse( deductible_nosnp < max_deduct[ max_deduct[ , 'year' ] %in% year , 'max_ded' ] , paste0( "3 - $201 to $" , max_deduct[ max_deduct[ , 'year' ] %in% year , 'max_ded' ] - 1 ) , 
+			ifelse( deductible_nosnp == max_deduct[ max_deduct[ , 'year' ] %in% year , 'max_ded' ] , paste0( "4 - $" , max_deduct[ max_deduct[ , 'year' ] %in% year , 'max_ded' ] ) , 
+			ifelse( deductible_nosnp > max_deduct[ max_deduct[ , 'year' ] %in% year , 'max_ded' ] , "mistake" , 
+				NA ) ) ) ) ) )
+	)
+
+if( any( lsc_df[ , 'dedcat' ] %in% 'mistake' ) ) stop( "plan with deductible above the limit" )
+
+
+# add moop categories, blanking out snps
+
+lsc_df[ lsc_df[ , 'snp' ] == 'Yes' , 'moop' ] <- NA
+
+
+lsc_df <- 
+	transform( 
+		lsc_df ,
+		moopcat = 
+			ifelse( moop <= 2500 , "1 - $2,5000 or less" , 
+			ifelse( moop <= 3400 , "2 - $2,501 to $3,400" , 
+			ifelse( moop <= 5000 , "3 - $3,401 to $5,000" , 
+			ifelse( moop < 6700 , "4 - $5,001 to $6,699" , 
+			ifelse( moop == 6700 , "5 - $6,700" , 
+			ifelse( moop <= 7550 , "6 - $6,701 to $7,550" ,
+			ifelse( moop < 8850 , "7 - $7,551 to $8,849" ,
+			ifelse( moop < 9250 , "8 - $8,850 to $9,249" ,
+			ifelse( moop == 9250 , "9 - $9,250" ,
+			ifelse( moop > 9250 , "mistake" , 
+				NA ) ) ) ) ) ) ) ) ) ) ,
+				
+		moopcat_5500 =
+			ifelse( moop <= 2500 , "1 - $2,5000 or less" , 
+			ifelse( moop <= 3400 , "2 - $2,501 to $3,400" , 
+			ifelse( moop < 5500 , "3 - $3,401 to $5,499" , 
+			ifelse( moop < 6700 , "4 - $5,500 to $6,699" , 
+			ifelse( moop == 6700 , "5 - $6,700" , 
+			ifelse( moop <= 7550 , "6 - $6,701 to $7,550" ,
+			ifelse( moop < 8850 , "7 - $7,551 to $8,849" ,
+			ifelse( moop < 9250 , "8 - $8,850 to $9,249" ,
+			ifelse( moop == 9250 , "9 - $9,250" ,
+			ifelse( moop > 9250 , "mistake" , 
+				NA ) ) ) ) ) ) ) ) ) )
+	)
+
+
+if( any( lsc_df[ , 'moopcat' ] %in% 'mistake' ) ) stop( "plan with moop above the limit" )
+
+if( any( lsc_df[ , 'moopcat_5500' ] %in% 'mistake' ) ) stop( "plan with moop above the limit" )
+
+
+
+
+
+if( Sys.Date() > '2026-01-01' ){
+
+	stop( "some contracts in the landscape file do not have a match in the contract directory.  this is allowed for fall availability but not spring enrollment" )
+
+	# merge the contract directory
+
+	before_nrow <- nrow( lsc_df )
+
+	lsc_df <- merge( lsc_df , contract_directory_df )
+
+	stopifnot( nrow( lsc_df ) == before_nrow )
+
+} else {
+
+	# merge the contract directory, ignoring missings
+
+	before_nrow <- nrow( lsc_df )
+
+	lsc_df <- merge( lsc_df , contract_directory_df , all.x = TRUE )
+
+	stopifnot( nrow( lsc_df ) == before_nrow )
+
+
+}
+
+
+
+# # # # # # # # # # # # # # # # # # # # # # # # # # # #
+# expand state-level records to one record per county #
+# # # # # # # # # # # # # # # # # # # # # # # # # # # #
+
+# using the penetration files plus blank connecticut records
+
+
+# separate statewide from county-specific records
+lsc_county_df <- subset( lsc_df , !( county %in% 'All Counties' ) )
+
+lsc_state_df <- subset( lsc_df , county %in% 'All Counties' )
+
+stopifnot( sort( intersect( names( lsc_df ) , names( pen_df ) ) ) == c( 'county' , 'state_name' ) )
+
+# for county-specific records, just tack on fips codes
+lsc_county_fips_df <- 
+	merge( 
+		lsc_county_df , 
+		pen_df
+	)
+
+# every record needs a matching fips from the penetration file
+stopifnot( nrow( lsc_county_fips_df ) == nrow( lsc_county_df ) )
+
+# for statewide records, merge many-to-many using only state
+lsc_state_fips_df <-
+	merge(
+		lsc_state_df[ , -which( names( lsc_state_df ) == 'county' ) ] ,
+		pen_df  ,
+		all.x = TRUE
+	)
+
+# every record needs a matching fips from the penetration file
+stopifnot( all( !is.na( lsc_state_fips_df[ , 'fips' ] ) ) )
+
+# every non-connecticut record has an eligibles count
+stopifnot( all( !is.na( lsc_state_fips_df[ ( lsc_state_fips_df[ , 'state_name' ] != 'Connecticut' ) , 'eligibles' ] ) ) )
+
+# now that statewide records have been expanded to one record per county,
+# stack those new records with the other county-specific records
+lsc_fips_df <- rbind( lsc_county_fips_df , lsc_state_fips_df )
+
+# investigate any duplicates
+stopifnot( nrow( lsc_fips_df ) == nrow( unique( lsc_fips_df ) ) )
+
+# investigate any missing segment_id records
+stopifnot( all( !is.na( lsc_fips_df[ , 'segment_id' ] ) ) )
+
+if( Sys.Date() > '2025-11-09' ) stop( "note missing eligibles, ma_enrolled, and pdp_enrolleed in connecticut" )
+
+# end of align county naming then merge "all counties" records with fips codes file
+
+
+
+# # # # # # # # # # # # # # # # # # # #
+# merge both 2013 and 2024 uic codes  #
+# because 2024 does not include conn. #
+# # # # # # # # # # # # # # # # # # # #
+
+before_nrow <- nrow( lsc_fips_df )
+lsc_fips_df <- merge( lsc_fips_df , usda_uic_2013_df , all.x = TRUE )
+lsc_fips_df <- merge( lsc_fips_df , usda_uic_2024_df , all.x = TRUE )
+stopifnot( nrow( lsc_fips_df ) == before_nrow )
+
+
+# # # # # # # # # # # # # # # # #
+# separate ma plans from part d #
+# ma-pds in both result tables  #
+# # # # # # # # # # # # # # # # #
+
+
+# remove standalone pdps
+ma_availability_df <- subset( lsc_fips_df , !( pt %in% c( 'Medicare Prescription Drug Plan' ) ) )
+
+# remove plans not offering part d
+pdp_availability_df <- subset( lsc_fips_df , partd == 'Yes' )
+
+
+
+
+# # # # # # # # # # # # # # # # # # # # # #
+# merge benefits table to ma availability #
+# # # # # # # # # # # # # # # # # # # # # #
+
+before_nrow <- nrow( ma_availability_df )
+
+ma_availability_df <- merge( ma_availability_df , benefits_df )
+
+stopifnot( nrow( ma_availability_df ) == before_nrow )
+
+
+
+
+
+# # # # # # # # # # # #
+# first of two saves #
+# # # # # # # # # # # #
+
+# one record per plan-county of ma availability in year
+
+saveRDS( ma_availability_df , file = paste0( "R:/Medicare Tracker/output/" , year - 1 , "09 medicare advantage county plan availability.rds" ) )
+
+
+
+
+
+
+# # # # # # # # # # # # # #
+# part d specific recodes #
+# # # # # # # # # # # # # #
+
+	
+stopifnot( all( no.na( pdp_availability_df[ , 'partd_deductible' ] <= max_deduct[ max_deduct[ , 'year' ] == year , 'max_ded' ] , TRUE ) ) )
+
+pdp_availability_df[ , 'partd_dedcat' ] <-
+	ifelse( pdp_availability_df[ , 'partd_deductible' ] == 0 , "01 - zero deductible" ,
+	ifelse( pdp_availability_df[ , 'partd_deductible' ] < max_deduct[ max_deduct[ , 'year' ] == year , 'max_ded' ] , "02 - partial deductible" ,
+	ifelse( pdp_availability_df[ , 'partd_deductible' ] == max_deduct[ max_deduct[ , 'year' ] == year , 'max_ded' ] , "03 - standard deductible" , "04 - mistake" ) ) )
+	
+
+
+pdp_availability_df <- 
+	transform( 
+		pdp_availability_df ,
+		partd_premcat =
+			factor( 
+				1 + findInterval( partd_premium , c( 0.01 , seq( 10 , 100 , 10 ) ) ) , 
+				levels = 1:12 , 
+				labels = 
+					paste( 
+						str_pad( 1:12 , 2 , pad = '0' ) , 
+						c( "Zero Premium" , paste0( "$" , c( 0.01 , seq( 10 , 90 , 10 ) ) , " to $" , seq( 9.99 , 99.99 , 10 ) ) , "$100 or more" ) , 
+						sep = " - " 
+					) 
+			)
+	)
+
+
+
+# # create a different gapcat variable for `pdp_availability_df`
+# pdp_availability_df$gapcat <-
+	# ifelse( pdp_availability_df$extra_coverage_in_gap %in% c( '.' , 'Y' ) , "Yes" ,
+	# ifelse( pdp_availability_df$extra_coverage_in_gap %in% c( '' , 'N' ) , "No" ,
+	# ifelse( pdp_availability_df$gap %in% c( 'No' , 'No Gap Coverage' , "None" ) , "No" ,
+	# ifelse( pdp_availability_df$gap %in% c( 'Yes' , "Many Generics and Some Brands", "Some Generics and Some Brands", 
+		# "Many Generics", "Some Generics", "Few Generics and Few Brands", 
+		# "Few Generics", "Many Generics and Few Brands", "All Generics and Few Brands", 
+		# "All Generics and All Brands", "All Generics", "Some Generics and Few Brands", 
+		# "All Generics and Some Brands", "Few Brands", "Some Generics, Some Brands", 
+		# "Many Generics, Some Brands", "Few Generics, Few Brands", "Some Generics, Few Brands", 
+		# "Many Generics, Few Brands", "All Generics, Few Brands", "All Generics, All Brands", 
+		# "Many Generics, Many Brands", "All Generics, Some Brands", "All Formulary Drugs", 
+		# "Many Generics and Many Brands", "Few Generics, Few Brand", "Many Generics, Few Brand", 
+		# "Many Generics, Some Brand", "All Generics, All Brand", "Many Generics, Many Brand", 
+		# "Some Generics, Few Brand", "All Generics, Some Brand", "All Generics, Few Brand", 
+		# "All Preferred Generics", "All Preferred Generics and Some Other Generics and Some Brands", 
+		# "All Preferred Generics and Some Brands", "All Drugs on Your Formulary", 
+		# "All Preferred Generics and All Preferred Brands", "All Generics and All Preferred Brands", 
+		# "G", "G/B") , "Yes" , NA ) ) ) )
+
+		
+# add pdp regions
+before_nrow <- nrow( pdp_availability_df )
+pdp_availability_df <- merge( pdp_availability_df , pdp_regions )
+stopifnot( nrow( pdp_availability_df ) == before_nrow )
+
+
+# NOTE: bench_cat must be constructed *before* `partd_lis_premium` because that step zeroes out benchmark premiums
+pdp_availability_df <- 
+	transform(
+		pdp_availability_df ,
+		bench_cat =
+		
+			# ALL enhanced benefit plans are not benchmark
+			ifelse( dbt %in% 'Enhanced' , "Not Benchmark" ,
+			
+			# any plan with a zero premium AND with text in the benchmark field is a benchmark plan
+			ifelse( below_regional_benchmark %in% 'Yes' & partd_lis_premium == 0 , "Benchmark" ,
+			
+			# any plan with a non-zero premium AND with text in the benchmark field is a de minimus plan
+			ifelse( de_minimis %in% 'Yes' & partd_lis_premium > 0 , "De minimus" ,
+			
+			ifelse( ( below_regional_benchmark %in% 'Yes' | de_minimis %in% 'Yes' ) , 'ERROR' ,
+			
+			# any plan with a non-missing entry in the part d files not meeting the above conditions is not a benchmark plan
+			ifelse( !is.na( below_regional_benchmark ) , "Not Benchmark" , 
+			
+				# plans with no match in the part d files stay missing
+				NA ) ) ) ) )
+			
+	)
+
+	
+
+
+
+
+
+pdp_availability_df <- 
+	transform(
+		pdp_availability_df ,
+		partd_lis_premium =
+			
+			# if the "below regional benchmark" column says "below regional benchmark"
+				# then recode to $0
+			ifelse( below_regional_benchmark %in% c( 'Yes' , 'Below Regional Benchmark' ) , 0 ,
+			
+				# for all other plans, don't touch the lis premium
+				partd_lis_premium ) 
+	)
+	
+	
+
+
+# # # # # # # # # # # # # # # # # #
+# cost sharing loading & recoding #
+# # # # # # # # # # # # # # # # # #
+
+
+this_rx_cost_sharing <- NULL
+
+pbp_mrx_tier_df <- load_benefits_fun( "pbp_mrx_tier" , benefits_dir = benefits_dir )
+
+# define five and six tier flags
+
+pbp_mrx_tier_df[ , "five_tier" ] <- 
+
+	as.numeric( 
+	
+		# older five_tier definition
+		grepl( "(^|, )Preferred Generic(s)?($|, )" , pbp_mrx_tier_df[ , "mrx_tier_form_model_desc" ] , ignore.case = TRUE ) &
+		grepl( "(^|, )(Non-Preferred )?Generic(s)?($|, )" , pbp_mrx_tier_df[ , "mrx_tier_form_model_desc" ] , ignore.case = TRUE ) &
+		grepl( "(^|, )Preferred (Brand|Drug)(s)?($|, )" , pbp_mrx_tier_df[ , "mrx_tier_form_model_desc" ] , ignore.case = TRUE ) &
+		grepl( "(^|, )Non-Preferred (Brand|Drug)(s)?($|, )" , pbp_mrx_tier_df[ , "mrx_tier_form_model_desc" ] , ignore.case = TRUE ) &
+		grepl( "Specialty" , pbp_mrx_tier_df[ , "mrx_tier_form_model_desc" ] , ignore.case = TRUE ) &
+		
+		# plus no sixth tiers
+		!grepl( "Select|Vaccines|Supplemental|Injectable" , pbp_mrx_tier_df[ , "mrx_tier_form_model_desc" ] , ignore.case = TRUE ) &
+		
+		# plus exactly four commas
+		grepl( '(.*),(.*),(.*),(.*),(.*)' , pbp_mrx_tier_df[ , "mrx_tier_form_model_desc" ] ) & !grepl( '(.*),(.*),(.*),(.*),(.*),(.*)' , pbp_mrx_tier_df[ , "mrx_tier_form_model_desc" ] )
+		
+	)
+
+pbp_mrx_tier_df[ , "six_tier" ] <- 
+
+	as.numeric( 
+	
+		# older five_tier definition
+		grepl( "(^|, )Preferred Generic(s)?($|, )" , pbp_mrx_tier_df[ , "mrx_tier_form_model_desc" ] , ignore.case = TRUE ) &
+		grepl( "(^|, )(Non-Preferred )?Generic(s)?($|, )" , pbp_mrx_tier_df[ , "mrx_tier_form_model_desc" ] , ignore.case = TRUE ) &
+		grepl( "(^|, )Preferred (Brand|Drug)(s)?($|, )" , pbp_mrx_tier_df[ , "mrx_tier_form_model_desc" ] , ignore.case = TRUE ) &
+		grepl( "(^|, )Non-Preferred (Brand|Drug)(s)?($|, )" , pbp_mrx_tier_df[ , "mrx_tier_form_model_desc" ] , ignore.case = TRUE ) &
+		grepl( "Specialty" , pbp_mrx_tier_df[ , "mrx_tier_form_model_desc" ] , ignore.case = TRUE ) &
+		
+		# plus sixth tiers
+		grepl( "Select|Vaccines|Supplemental|Injectable" , pbp_mrx_tier_df[ , "mrx_tier_form_model_desc" ] , ignore.case = TRUE ) &
+		
+		# plus exactly five commas
+		grepl( '(.*),(.*),(.*),(.*),(.*),(.*)' , pbp_mrx_tier_df[ , "mrx_tier_form_model_desc" ] ) & !grepl( '(.*),(.*),(.*),(.*),(.*),(.*),(.*)' , pbp_mrx_tier_df[ , "mrx_tier_form_model_desc" ] )
+		
+	)
+
+pbp_mrx_tier_df[ , 'five_or_six_tier' ] <- pmax( pbp_mrx_tier_df[ , 'five_tier' ] , pbp_mrx_tier_df[ , 'six_tier' ] )
+
+# categorization results:
+table( pbp_mrx_tier_df[ , c( "mrx_tier_form_model_desc" , "five_or_six_tier" ) ] , useNA = 'always' )
+	
+
+
+# combine two copay & two coins variables into a single copay & single coins column
+
+# double-check that for every record, at least one is missing (so not to throw out information)
+stopifnot( all( is.na( pbp_mrx_tier_df[ , "mrx_tier_rstd_copay_1m" ] ) | is.na( pbp_mrx_tier_df[ , "mrx_tier_rspfd_copay_1m" ] ) ) )
+stopifnot( all( is.na( pbp_mrx_tier_df[ , "mrx_tier_rstd_coins_1m" ] ) | is.na( pbp_mrx_tier_df[ , "mrx_tier_rspfd_coins_1m" ] ) ) )
+
+pbp_mrx_tier_df[ , "copay" ] <- 
+	ifelse( is.na( pbp_mrx_tier_df[ , "mrx_tier_rstd_copay_1m" ] ) , pbp_mrx_tier_df[ , "mrx_tier_rspfd_copay_1m" ] , pbp_mrx_tier_df[ , "mrx_tier_rstd_copay_1m" ] )
+
+pbp_mrx_tier_df[ , "coins" ] <- 
+	ifelse( is.na( pbp_mrx_tier_df[ , "mrx_tier_rstd_coins_1m" ] ) , pbp_mrx_tier_df[ , "mrx_tier_rspfd_coins_1m" ] , pbp_mrx_tier_df[ , "mrx_tier_rstd_coins_1m" ] )
+
+
+
+# 
+
+pbp_mrx_tier_df[ , "original_mrx_tier_label_list" ] <- pbp_mrx_tier_df[ , "mrx_tier_label_list" ]
+
+pbp_mrx_tier_df[ , "mrx_tier_label_list" ] <-
+	tolower( iconv( pbp_mrx_tier_df[ , "mrx_tier_label_list" ] , from = '' , to = 'ASCII' , sub = ' ' ) )
+
+# simplify tier text to minimize categories:
+pbp_mrx_tier_df[ , "mrx_tier_label_list" ] <- gsub( "drugs" , "drug" , pbp_mrx_tier_df[ , "mrx_tier_label_list" ] )
+pbp_mrx_tier_df[ , "mrx_tier_label_list" ] <- gsub( "brand drug" , "brand" , pbp_mrx_tier_df[ , "mrx_tier_label_list" ] )
+pbp_mrx_tier_df[ , "mrx_tier_label_list" ] <- gsub( "generic drug" , "generic" , pbp_mrx_tier_df[ , "mrx_tier_label_list" ] )
+pbp_mrx_tier_df[ pbp_mrx_tier_df[ , "mrx_tier_label_list" ] == 'non-preferred brand' , "mrx_tier_label_list" ] <- 'non-preferred drug'
+
+stopifnot( 
+	all( 
+		pbp_mrx_tier_df[ , "mrx_tier_label_list" ] %in% 
+			c( 
+				"generic", "brand", "non-medicare rx/otc drug", "preferred generic", 
+				"preferred brand", "specialty tier", "select care drug", "single tier",
+				"non-preferred drug", "non-medicare rx drug", "non-medicare otc drug", "vaccines", 
+				"select diabetic drug", "supplemental drug", "preferred specialty tier", "$0 drug"
+			)
+	)
+)
+
+
+pbp_mrx_tier_df <-
+	transform(
+		pbp_mrx_tier_df ,
+		
+		mrx_tier_label_list =
+			ifelse(
+				( mrx_tier_id == 1 & mrx_tier_label_list == 'preferred generic' ) |
+				( mrx_tier_id == 2 & mrx_tier_label_list == 'generic' ) |
+				( mrx_tier_id == 3 & mrx_tier_label_list == 'preferred brand' ) |
+				( mrx_tier_id == 4 & mrx_tier_label_list == 'non-preferred drug' ) |
+				( mrx_tier_id == 5 & mrx_tier_label_list == 'specialty tier' ) , mrx_tier_label_list , NA
+				
+			)
+	)
+
+
+# in 2025, all mrx tier type ids were 1, review if this changes
+stopifnot( all( pbp_mrx_tier_df[ , "mrx_tier_type_id" ] %in% 1 ) )
+
+
+# reshape one record per contract+plan_segment+tier into
+# one record per contract+plan_segment df
+specialty_coins <- 
+	unique( 
+		pbp_mrx_tier_df[ 
+	
+			( !is.na( pbp_mrx_tier_df[ , "coins" ] ) | !is.na( pbp_mrx_tier_df[ , "copay" ] ) ) & 
+			pbp_mrx_tier_df[ , "mrx_tier_label_list" ] %in% 'specialty tier' , 
+			
+			c( 'contract_id' , 'plan_id' , 'segment_id' , 'copay' , 'coins' , 'mrx_tier_extd_days_yn' ) 
+		] 
+	)
+
+preferred_generic <- 
+	unique( 
+		pbp_mrx_tier_df[
+			( !is.na( pbp_mrx_tier_df[ , "coins" ] ) | !is.na( pbp_mrx_tier_df[ , "copay" ] ) ) & 
+			pbp_mrx_tier_df[ , "mrx_tier_label_list" ] %in% 'preferred generic' , 
+			
+			c( 'contract_id' , 'plan_id' , 'segment_id' , 'copay' , 'coins' , 'mrx_tier_extd_days_yn' ) 
+		] 
+	)
+	
+preferred_brand <- 
+	unique( 
+		pbp_mrx_tier_df[ 
+			( !is.na( pbp_mrx_tier_df[ , "coins" ] ) | !is.na( pbp_mrx_tier_df[ , "copay" ] ) ) & 
+			pbp_mrx_tier_df[ , "mrx_tier_label_list" ] %in% 'preferred brand' , 
+			
+			c( 'contract_id' , 'plan_id' , 'segment_id' , 'copay' , 'coins' , 'mrx_tier_extd_days_yn' ) 
+		] 
+	)
+
+generic <- 
+	unique( 
+		pbp_mrx_tier_df[ 
+			( !is.na( pbp_mrx_tier_df[ , "coins" ] ) | !is.na( pbp_mrx_tier_df[ , "copay" ] ) ) & 
+			pbp_mrx_tier_df[ , "mrx_tier_label_list" ] %in% 'generic' , 
+			
+			c( 'contract_id' , 'plan_id' , 'segment_id' , 'copay' , 'coins' , 'mrx_tier_extd_days_yn' ) 
+		] 
+	)
+	
+non_preferred_drug <- 
+	unique( 
+		pbp_mrx_tier_df[ 
+			( !is.na( pbp_mrx_tier_df[ , "coins" ] ) | !is.na( pbp_mrx_tier_df[ , "copay" ] ) ) & 
+			pbp_mrx_tier_df[ , "mrx_tier_label_list" ] %in% 'non-preferred drug' , 
+			
+			c( 'contract_id' , 'plan_id' , 'segment_id' , 'copay' , 'coins' , 'mrx_tier_extd_days_yn' ) 
+		] 
+	)
+
+five_tier <- 
+	unique( 
+		pbp_mrx_tier_df[ 
+			!is.na( pbp_mrx_tier_df[ , "five_tier" ] ) ,
+			
+			c( 'contract_id' , 'plan_id' , 'segment_id' , 'five_tier' , 'six_tier' , 'five_or_six_tier' ) 
+		] 
+	)
+
+
+names( specialty_coins )[4:6] <- c( 'specialty_copay' , 'specialty_coins' , 'specialty_extended_supply' )
+names( preferred_generic )[4:6] <- c( 'preferred_generic_copay' , 'preferred_generic_coins' , 'preferred_generic_extended_supply' )
+names( preferred_brand )[4:6] <- c( 'preferred_brand_copay' , 'preferred_brand_coins' , 'preferred_brand_extended_supply' )
+names( generic )[4:6] <- c( 'generic_copay' , 'generic_coins' , 'generic_extended_supply' )
+names( non_preferred_drug )[4:6] <- c( 'non_preferred_drug_copay' , 'non_preferred_drug_coins' , 'non_preferred_extended_supply' )
+
+stopifnot( nrow( unique( specialty_coins[ 1:3 ] ) ) == nrow( specialty_coins ) )
+stopifnot( nrow( unique( preferred_generic[ 1:3 ] ) ) == nrow( preferred_generic ) )
+stopifnot( nrow( unique( preferred_brand[ 1:3 ] ) ) == nrow( preferred_brand ) )
+stopifnot( nrow( unique( generic[ 1:3 ] ) ) == nrow( generic ) )
+stopifnot( nrow( unique( non_preferred_drug[ 1:3 ] ) ) == nrow( non_preferred_drug ) )
+
+
+stopifnot( nrow( unique( five_tier[ 1:3 ] ) ) == nrow( five_tier ) )
+
+this_rx_cost_sharing <- merge( specialty_coins , preferred_generic , all = TRUE )
+this_rx_cost_sharing <- merge( this_rx_cost_sharing , preferred_brand , all = TRUE )
+this_rx_cost_sharing <- merge( this_rx_cost_sharing , generic , all = TRUE )
+this_rx_cost_sharing <- merge( this_rx_cost_sharing , non_preferred_drug , all = TRUE )
+this_rx_cost_sharing <- merge( this_rx_cost_sharing , five_tier , all = TRUE )
+
+stopifnot( nrow( unique( five_tier[ 1:3 ] ) ) == nrow( this_rx_cost_sharing ) )
+
+
+# extended supply flags
+this_rx_cost_sharing[ , 'any_tier_extended_supply' ] <-
+	apply( this_rx_cost_sharing[ , grep( "_extended_supply$" , names( this_rx_cost_sharing ) , value = TRUE ) ] , 1 , min , na.rm = TRUE )
+	
+this_rx_cost_sharing[ this_rx_cost_sharing[ , 'any_tier_extended_supply' ] %in% Inf , 'any_tier_extended_supply' ] <- NA
+
+this_rx_cost_sharing[ , 'either_generic_tier_extended_supply' ] <-
+	apply( this_rx_cost_sharing[ , c( 'preferred_generic_extended_supply' , 'generic_extended_supply' ) ] , 1 , min , na.rm = TRUE )
+	
+this_rx_cost_sharing[ this_rx_cost_sharing[ , 'either_generic_tier_extended_supply' ] %in% Inf , 'either_generic_tier_extended_supply' ] <- NA
+	
+this_rx_cost_sharing[ , 'either_brand_tier_extended_supply' ] <-
+	apply( this_rx_cost_sharing[ , c( 'preferred_brand_extended_supply' , 'non_preferred_extended_supply' ) ] , 1 , min , na.rm = TRUE )
+	
+this_rx_cost_sharing[ this_rx_cost_sharing[ , 'either_brand_tier_extended_supply' ] %in% Inf , 'either_brand_tier_extended_supply' ] <- NA
+	
+
+this_rx_cost_sharing[ , 'plan_id' ] <- as.numeric( this_rx_cost_sharing[ , 'plan_id' ] )
+	
+# end of rx cost sharing preparation
+
+
+
+
+
+
+
+
+
+
+# tack on rx cost sharing
+before_nrow <- nrow( pdp_availability_df )
+pdp_availability_df <- merge( pdp_availability_df , this_rx_cost_sharing , all.x = TRUE )
+stopifnot( nrow( pdp_availability_df ) == before_nrow )
+
+pdp_availability_df <- 
+	transform( 
+		pdp_availability_df ,
+
+		prefbrand_copay_cat = factor( 1 + findInterval( preferred_brand_copay , c( 35 , 40 , 45 , 50 ) ) , levels = 1:5 , labels = c( "$34.99 or less" , "$35.00-$39.99" , "$40.00-$44.99" , "$45.00-$49.99" , "$50.00 or more" ) ) ,
+		prefbrand_coins_cat = factor( 1 + findInterval( preferred_brand_coins , c( 25 , 40 , 46 , 50 ) ) , levels = 1:5 , labels = c( '24.99% or less' , '25.00%-39.99%' , '40.00%-45.99%' , '46.00%-49.99%' , '50.00% or more' ) ) ,
+		nonpbrand_copay_cat = factor( 1 + findInterval( non_preferred_drug_copay , c( 80 , 90 , 95 , 100 ) ) , levels = 1:5 , labels = c( '$079.99 or less' , '$080.00-$089.99' , '$090.00-$094.99' , '$095.00-$099.99' , '$100.00 or more' ) ) ,
+		nonpbrand_coins_cat = factor( 1 + findInterval( non_preferred_drug_coins , c( 35 , 40 , 46 , 50 ) ) , levels = 1:5 , labels = c( '34.99% or less' , '35.00%-39.99%' , '40.00%-45.99%' , '46.00%-49.99%' , '50.00% or more' ) ) ,
+		spec_coins_cat = factor( 1 + findInterval( specialty_coins , c( 25 , 26 , 33 ) ) , levels = 1:4 , labels = c( "24.99% or less" , "25.00% to 25.99%" , "26.00% to 32.99%" , "33.00% or more" ) ) ,
+		
+		prefgen_copay_cat = factor( 1 + findInterval( preferred_generic_copay , c( 0.01 , 3 , 6 , 10 , 12 , 15 ) ) , levels = 1:7 , labels = c( '$00.00' , '$00.01 - $02.99' , '$03.00 - $05.99' , '$06.00 - $09.99' , '$10.00 - $11.99' , '$12.00 - $14.99' , '$15.00 or more' ) ) ,
+		gen_copay_cat = factor( 1 + findInterval( generic_copay , c( 0.01 , 3 , 6 , 10 , 12 , 15 ) ) , levels = 1:7 , labels = c( '$00.00' , '$00.01 - $02.99' , '$03.00 - $05.99' , '$06.00 - $09.99' , '$10.00 - $11.99' , '$12.00 - $14.99' , '$15.00 or more' ) )
+		
+		
+	)
+			
+
+# # # # # # # # # # # # # # # # #
+# add tiered_pharmacy variable  #
+# # # # # # # # # # # # # # # # #
+
+pbp_mrx_fn <- paste0( benefits_dir , "pbp_mrx.txt" )
+
+pbp_mrx_df <- readr::read_delim( pbp_mrx_fn , delim = "\t" , guess_max = 10000 , quote = "" , show_col_types = FALSE )
+
+stopifnot( nrow( pbp_mrx_df ) == R.utils::countLines( pbp_mrx_fn ) - 1 )
+
+pbp_mrx_df <- data.frame( pbp_mrx_df )
+			
+pbp_mrx_df[ , 'tiered_pharmacy' ] <- as.numeric( substr( pbp_mrx_df[ , 'mrx_partd_network_loc' ] , 3 , 3 ) %in% '1' )
+
+names( pbp_mrx_df )[ names( pbp_mrx_df ) == 'pbp_a_hnumber' ] <- 'contract_id'
+
+names( pbp_mrx_df )[ names( pbp_mrx_df ) == 'pbp_a_plan_identifier' ] <- 'plan_id'
+
+pbp_mrx_df[ , 'plan_id' ] <- as.numeric( pbp_mrx_df[ , 'plan_id' ] )
+
+pbp_mrx_df <- unique( pbp_mrx_df[ c( 'contract_id' , 'plan_id' , 'tiered_pharmacy' , 'mrx_form_model_type' , 'mrx_form_model_desc' ) ] )
+
+# confirm no segment_id variation
+stopifnot( nrow( unique( pbp_mrx_df[ c( 'contract_id' , 'plan_id' ) ] ) ) == nrow( pbp_mrx_df ) )
+
+before_nrow <- nrow( pdp_availability_df )
+
+pdp_availability_df <- merge( pdp_availability_df , pbp_mrx_df , all.x = TRUE )
+
+stopifnot( nrow( pdp_availability_df ) == before_nrow )
+
+
+
+
+
+
+# # # # # # # # # # # # #
+# second of two saves  #
+# # # # # # # # # # # # #
+
+
+saveRDS( pdp_availability_df , file = paste0( "R:/Medicare Tracker/output/" , year - 1 , "09 pdp county plan availability.rds" ) )
+
+
+# # # end of historic YYYY09 prescription drug county plan availability.rda creation # # #
+
+
